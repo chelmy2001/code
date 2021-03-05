@@ -1,0 +1,145 @@
+################################################################
+# Code Challenge Solution by Michael Tchona
+#################################################################
+
+# This is the provider's information #
+
+provider "aws" {
+    region = "us-east-1"
+}
+
+# These are variables for ingress and egress rules #
+variable "ingressrules" {
+    type = list(number)
+    default = [80, 443, 5985]
+}
+
+variable "egressrules" {terrafor
+    type = list(number)
+    default = [80, 443, 5985]
+}
+
+
+# This part of the code will search for the latest AMI from AWS. 
+# You can get the "owners" information and the information for the filters by getting Windows Server 2019
+# AMI ID from the AWS console and running below command from AWS CLI:
+# -- "aws ec2 describe-images --owners amazon --image-ids  ami-02642c139a9dfb378"
+
+data "aws_ami" "windows" {
+  most_recent = true
+
+  filter {
+      name   = "name"
+      values = ["Windows_Server-2019-English-Full-Base-*"]
+  }
+
+  filter {
+      name   = "root-device-type"
+      values = ["ebs"]
+  }
+
+  filter {
+      name   = "virtualization-type"
+      values = ["hvm"]
+  }
+
+  owners = ["801119661308"]
+
+}
+
+# This will provision the Windows Server 2019 instance, install IIS (Internet Information Server) on it, 
+# and copy the index.html file to the server
+
+resource "aws_instance" "webserver01" {
+    ami = data.aws_ami.windows.id
+    instance_type = "t2.micro"
+    security_groups = [aws_security_group.webtraffic.name]
+
+    tags = {
+        Name = "webserver01"
+    }   
+    user_data = <<EOF
+    <powershell>
+        net user ${var.INSTANCE_USERNAME} ${var.INSTANCE_PASSWORD} /add
+        net localgroup administrators ${var.INSTANCE_USERNAME} /add
+
+        winrm quickconfig -q
+        winrm set winrm/config/winrs '@{MaxMemoryPerShellMB="300"}'
+        winrm set winrm/config '@{MaxTimeoutms="1800000"}'
+        winrm set winrm/config/service '@{AllowUnencrypted="true"}'
+        winrm set winrm/config/service/auth '@{Basic="true"}'
+
+        netsh advfirewall firewall add rule name="WinRM 5985" protocol=TCP dir=in localport=5985 action=allow
+        netsh advfirewall firewall add rule name="WinRM 5986" protocol=TCP dir=in localport=5986 action=allow
+
+        net stop winrm
+        sc.exe config winrm start=auto
+        net start winrm
+        mkdir C:\Project
+
+        Start-Process powershell -Verb runAs  
+        Install-WindowsFeature -Name Web-Server -IncludeAllSubFeature -IncludeManagementTools    
+        Import-Module WebAdministration
+        netsh advfirewall firewall add rule name="WinRM 5985" protocol=TCP dir=in localport=5985 action=allow
+        netsh advfirewall firewall add rule name="WinRM 5986" protocol=TCP dir=in localport=5986 action=allow
+        Get-WebSite -Name "Default Web Site" | Remove-WebSite -Confirm:$false -Verbose
+        New-Website -Name manish -ApplicationPool DefaultAppPool -IPAddress * -PhysicalPath C:\Project -Port 80
+        iisreset
+    </powershell>
+  EOF
+
+  provisioner "file" {
+    source = "./index.html"
+    destination = "C:/Project/index.html"
+    }
+
+  connection {
+    type = "winrm"
+    host     = aws_instance.webserver01.public_ip
+    user = var.INSTANCE_USERNAME
+    password = var.INSTANCE_PASSWORD
+    }
+
+}
+
+# This will provision an Elastic IP for the EC2 instance
+
+resource "aws_eip" "webserver01eip" {
+    instance = aws_instance.webserver01.id
+    tags = {
+        Name = "webserver01eEIP"
+    }
+}
+
+# This will create Security Group for the instance based on the variables defined above
+
+resource "aws_security_group" "webtraffic" {
+    name = "Allow HTTPS"
+    
+    dynamic "ingress" {
+        iterator = port
+        for_each = var.ingressrules
+        content {
+        from_port = port.value
+        to_port = port.value
+        protocol = "TCP"
+        cidr_blocks = ["0.0.0.0/0"]
+        }
+    }
+
+    dynamic "egress" {
+        iterator = port
+        for_each = var.egressrules
+        content {
+        from_port = port.value
+        to_port = port.value
+        protocol = "TCP"
+        cidr_blocks = ["0.0.0.0/0"]
+        }
+    }
+}
+
+# This will display the EIP of the server once provisioning of resource completes
+
+output "WEBSERVER01EIP" {
+    value = aws_eip.webserver01eip.public_ip
